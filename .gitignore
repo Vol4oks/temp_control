@@ -1,0 +1,5 @@
+/.vscode
+/.embuild
+/target
+# Секреты Wi-Fi — не коммитим
+/secrets.toml

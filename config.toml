@@ -1,0 +1,39 @@
+# Конфигурация temp_control (коммитится в git).
+# Секреты Wi-Fi — в secrets.toml (в .gitignore), шаблон: secrets.toml.example
+
+[pins]
+dht11_data = 4   # DHT11 DATA (GPIO4-7 на C6 заняты JTAG — отладка через JTAG недоступна)
+i2c_sda = 6      # SSD1306 SDA
+i2c_scl = 7      # SSD1306 SCL
+
+[display]
+i2c_address = 0x3C
+width = 128
+height = 64
+
+[intervals]
+sensor_poll_secs = 2
+display_refresh_secs = 1
+history_save_secs = 60
+
+[history]
+max_points = 240  # глубина истории (см. docs/QUESTIONS.md ОВ-3)
+
+[calibration]
+# Двухточечная калибровка: пары «показал датчик → реально есть».
+# По умолчанию — идентичность (значения проходят без изменений).
+# Опорные точки снимайте в заметно разных условиях: близкие measured_*
+# дают нестабильный наклон. Точки можно менять и через браузер (Этап 4):
+# тогда значения из браузера (NVS) имеют приоритет над этим файлом.
+
+[calibration.temperature]
+measured_1 = 0.0
+real_1 = 0.0
+measured_2 = 1.0
+real_2 = 1.0
+
+[calibration.humidity]
+measured_1 = 0.0
+real_1 = 0.0
+measured_2 = 1.0
+real_2 = 1.0

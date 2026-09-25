@@ -159,12 +159,33 @@ fn main() -> anyhow::Result<()> {
     })?;
     log::info!("web: HTTP-сервер запущен на порту 80");
 
-    // Поток задач — не-демоны (как в std): ждём завершения сенсора, чтобы
-    // отловить падение задачи. Он умирает только при закрытии всех каналов.
-    _sensor_task
-        .join()
-        .map_err(|_| anyhow::anyhow!("поток sensor_task завершился паникой"))?;
+    // Supervisor: устройство без присмотра — смерть любого фонового потока
+    // означает невосстановимую деградацию (драйверы периферии уничтожены
+    // вместе с потоком и не пересоздаются без перезагрузки), поэтому —
+    // лог + перезагрузка устройства.
+    supervise(vec![
+        ("sensor_task", _sensor_task),
+        ("display_task", _display_task),
+        ("logging_task", _logging_task),
+        ("web_pump", _web_pump),
+        ("wifi_keepalive", _wifi_task),
+    ]);
+}
 
-    log::info!("сенсорная задача завершена");
-    Ok(())
+/// Следит за фоновыми потоками: при завершении любого (паника или закрытие
+/// канала) логирует имя и перезагружает устройство. Не возвращает управление.
+fn supervise(tasks: Vec<(&'static str, std::thread::JoinHandle<()>)>) -> ! {
+    loop {
+        std::thread::sleep(Duration::from_secs(5));
+        for (name, handle) in &tasks {
+            if handle.is_finished() {
+                log::error!("supervisor: задача {name} завершилась — перезагрузка устройства");
+                // Даём ESP_LOG успеть отправить сообщение перед сбросом.
+                std::thread::sleep(Duration::from_millis(200));
+                // SAFETY: esp_restart — штатная программная перезагрузка ESP-IDF;
+                // требования к контексту (не ISR) соблюдены — вызов из обычного потока.
+                unsafe { esp_idf_svc::sys::esp_restart() };
+            }
+        }
+    }
 }

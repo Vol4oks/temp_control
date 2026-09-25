@@ -90,7 +90,8 @@
     - `GET/POST /api/sntp` + `POST /api/sntp/reset`; валидация hostname на POST
     - ось графика в реальном времени (когда все точки синхронизированы), иначе «назад»
     - ✅ проверено на железе
-3. [ ] Supervisor: смерть фонового потока → лог + перезагрузка устройства; чистка embassy-time
+3. [x] Supervisor: смерть фонового потока → лог + перезагрузка (esp_restart в main.rs);
+    embassy-time удалён из зависимостей (manifest-warning исчез)
 4. [ ] lib-таргет (calibration/config) + хост-тесты `cargo test --lib` + CI job
 5. [ ] NVS-раздел 0x6000 → 0x18000 (partitions.csv; NVS обнулится после первой прошивки)
 6. [ ] README + docs под финальное состояние

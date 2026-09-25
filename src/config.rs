@@ -15,6 +15,8 @@ pub struct Config {
     pub history: History,
     #[serde(default)]
     pub calibration: CalibrationConfig,
+    #[serde(default)]
+    pub sntp: SntpConfig,
 }
 
 /// Секция `[calibration]` — двухточечная калибровка. Опциональна:
@@ -111,6 +113,22 @@ pub struct History {
     pub max_points: usize,
 }
 
+/// Секция `[sntp]` — сервер времени. Опциональна; меняется и через веб
+/// (значение из браузера хранится в NVS и имеет приоритет).
+#[derive(Debug, Deserialize)]
+#[serde(default)]
+pub struct SntpConfig {
+    pub server: String,
+}
+
+impl Default for SntpConfig {
+    fn default() -> Self {
+        Self {
+            server: "pool.ntp.org".to_owned(),
+        }
+    }
+}
+
 /// Секреты из `secrets.toml`.
 #[derive(Debug, Deserialize)]
 pub struct Secrets {
@@ -155,6 +173,10 @@ pub fn load() -> anyhow::Result<(Config, Secrets)> {
             && config.intervals.history_save_secs > 0
             && config.intervals.history_point_secs > 0,
         "все intervals.*_secs должны быть больше нуля"
+    );
+    anyhow::ensure!(
+        !config.sntp.server.trim().is_empty(),
+        "sntp.server не должен быть пустым"
     );
 
     Ok((config, secrets))

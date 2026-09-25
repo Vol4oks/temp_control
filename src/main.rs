@@ -90,12 +90,25 @@ fn main() -> anyhow::Result<()> {
         config.intervals.sensor_poll_secs
     );
 
+    // SNTP: сервер из NVS поверх config.toml (веб имеет приоритет).
+    let sntp_state = Arc::new(Mutex::new(net::SntpState {
+        server: match store.load_sntp_server()? {
+            Some(saved) => {
+                log::info!("SNTP-сервер загружен из NVS: {saved}");
+                saved
+            }
+            None => config.sntp.server.clone(),
+        },
+        restart_pending: false,
+    }));
+
     let net_status = Arc::new(Mutex::new(net::NetStatus::default()));
     let _wifi_task = net::start(
         peripherals_modem,
         nvs_partition,
         &secrets.wifi,
         Arc::clone(&net_status),
+        Arc::clone(&sntp_state),
     )?;
 
     // По каналу на подписчика: экран, веб, логгер истории.
@@ -141,6 +154,8 @@ fn main() -> anyhow::Result<()> {
         net: net_status,
         history,
         history_point_secs: config.intervals.history_point_secs,
+        sntp: sntp_state,
+        sntp_config_server: config.sntp.server.clone(),
     })?;
     log::info!("web: HTTP-сервер запущен на порту 80");
 

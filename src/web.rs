@@ -19,11 +19,12 @@ use anyhow::{Context, Result};
 use embedded_svc::http::{Headers, Method};
 use esp_idf_svc::http::server::{Configuration, EspHttpServer, Request};
 use esp_idf_svc::io::{Read, Write};
+use serde::Deserialize;
 use serde_json::json;
 
 use crate::calibration::Calibration;
 use crate::history::History;
-use crate::net::NetStatus;
+use crate::net::{NetStatus, SntpState};
 use crate::sensor::Reading;
 use crate::storage::NvsStore;
 
@@ -46,6 +47,16 @@ pub struct WebState {
     pub history: Arc<Mutex<History>>,
     /// Период точки истории (для фронтенда).
     pub history_point_secs: u64,
+    /// Состояние SNTP (keepalive пересоздаёт клиент по флагу).
+    pub sntp: Arc<Mutex<SntpState>>,
+    /// NTP-сервер из config.toml — цель для `POST /api/sntp/reset`.
+    pub sntp_config_server: String,
+}
+
+/// Тело `POST /api/sntp`.
+#[derive(Deserialize)]
+struct SntpBody {
+    server: String,
 }
 
 /// Запускает поток-насос: канал сенсора → `latest` для HTTP-хендлеров.
@@ -174,7 +185,84 @@ pub fn start_server(state: WebState) -> Result<EspHttpServer<'static>> {
         )
     })?;
 
+    let sntp_state = state.sntp.clone();
+    let sntp_store = state.store.clone();
+    server.fn_handler::<anyhow::Error, _>("/api/sntp", Method::Get, move |req| {
+        let server = match sntp_state.lock() {
+            Ok(guard) => guard.server.clone(),
+            Err(poisoned) => poisoned.into_inner().server.clone(),
+        };
+        let source = if sntp_store.has_sntp_key()? {
+            "nvs"
+        } else {
+            "config"
+        };
+        respond_json(req, 200, &json!({ "server": server, "source": source }))
+    })?;
+
+    let sntp_state = state.sntp.clone();
+    let sntp_store = state.store.clone();
+    server.fn_handler::<anyhow::Error, _>("/api/sntp", Method::Post, move |mut req| {
+        let body = read_body(&mut req)?;
+        let parsed: SntpBody =
+            serde_json::from_str(&body).map_err(|e| anyhow::anyhow!("некорректный JSON: {e}"))?;
+        let server = validate_hostname(&parsed.server)?;
+
+        sntp_store.save_sntp_server(&server)?;
+        match sntp_state.lock() {
+            Ok(mut guard) => {
+                guard.server = server.clone();
+                guard.restart_pending = true;
+            }
+            Err(poisoned) => {
+                let mut guard = poisoned.into_inner();
+                guard.server = server.clone();
+                guard.restart_pending = true;
+            }
+        }
+        log::info!("web: NTP-сервер сменён на {server}");
+        respond_json(req, 200, &json!({ "ok": true }))
+    })?;
+
+    let sntp_state = state.sntp.clone();
+    let sntp_store = state.store.clone();
+    let sntp_config_server = state.sntp_config_server;
+    server.fn_handler::<anyhow::Error, _>("/api/sntp/reset", Method::Post, move |req| {
+        sntp_store.clear_sntp_server()?;
+        match sntp_state.lock() {
+            Ok(mut guard) => {
+                guard.server = sntp_config_server.clone();
+                guard.restart_pending = true;
+            }
+            Err(poisoned) => {
+                let mut guard = poisoned.into_inner();
+                guard.server = sntp_config_server.clone();
+                guard.restart_pending = true;
+            }
+        }
+        log::info!("web: NTP-сервер сброшен к config.toml");
+        respond_json(req, 200, &json!({ "ok": true }))
+    })?;
+
     Ok(server)
+}
+
+/// Валидация имени NTP-сервера: латиница/цифры/точка/дефис, до 64 символов.
+/// IP-адреса (v4) проходят — тоже допустимый адрес NTP-сервера.
+///
+/// # Errors
+/// Возвращает ошибку, если строка пустая, слишком длинная или с недопустимыми
+/// символами.
+fn validate_hostname(raw: &str) -> Result<String> {
+    let s = raw.trim();
+    anyhow::ensure!(!s.is_empty(), "адрес сервера пустой");
+    anyhow::ensure!(s.len() <= 64, "адрес сервера длиннее 64 символов");
+    anyhow::ensure!(
+        s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-'),
+        "адрес сервера: допустимы латиница, цифры, точка и дефис"
+    );
+    Ok(s.to_owned())
 }
 
 fn clone_latest(state: &Arc<Mutex<Option<Reading>>>) -> Option<Reading> {

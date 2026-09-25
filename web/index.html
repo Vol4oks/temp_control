@@ -13,6 +13,7 @@
   .row { display: flex; gap: 1rem; flex-wrap: wrap; align-items: center; }
   .value { font-size: 1.6rem; font-variant-numeric: tabular-nums; }
   button { padding: 0.5rem 1rem; border: 1px solid var(--line); border-radius: 6px; background: #fff; cursor: pointer; }
+  input { padding: 0.4rem 0.6rem; border: 1px solid var(--line); border-radius: 6px; font: inherit; }
   button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
   #msg { min-height: 1.2em; font-size: 0.9rem; }
   .grid-wrap { display: flex; gap: 1rem; flex-wrap: wrap; }
@@ -45,6 +46,21 @@
   </div>
 </div>
 <div class="muted">Среднее за окно усреднения; обновление раз в минуту.</div>
+
+<h2>Время (SNTP)</h2>
+<div class="card">
+  <div class="row">
+    <span class="muted">Текущий сервер:</span>
+    <span class="muted" id="sntp-current">--</span>
+    <span class="muted" id="sntp-src"></span>
+  </div>
+  <div class="row">
+    <input id="sntp-server" maxlength="64" placeholder="pool.ntp.org">
+    <button class="primary" id="sntp-save">Сохранить</button>
+    <button id="sntp-reset">Сбросить к конфигу</button>
+    <span id="sntp-msg"></span>
+  </div>
+</div>
 
 <h2>Калибровка</h2>
 <p class="muted">
@@ -190,8 +206,24 @@ function makeHistoryChart(container, { field, unit, color, flatPad }) {
 
     const t0 = points[0].uptime_secs;
     const t1 = points[points.length - 1].uptime_secs || t0 + 1;
-    const x = u => padL + (u - t0) / (t1 - t0 || 1) * (W - padL - padR);
+    // Ось X: реальное время, если все точки синхронизированы (unix > 0),
+    // иначе — относительное (минуты/часы назад от последней точки).
+    const useWall = points.every(p => p.unix_secs > 0);
+    const key = useWall ? "unix_secs" : "uptime_secs";
+    const u0 = points[0][key];
+    const u1 = points[points.length - 1][key] || u0 + 1;
+    const x = u => padL + (u - u0) / (u1 - u0 || 1) * (W - padL - padR);
     const y = v => padT + (max - v) / (max - min) * (H - padT - padB);
+
+    const fmtPoint = p => {
+      if (useWall) {
+        const d = new Date(p.unix_secs * 1000);
+        const hm = `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+        return { axis: hm, tip: `${String(d.getDate()).padStart(2, "0")}.${String(d.getMonth() + 1).padStart(2, "0")} ${hm}` };
+      }
+      const agoMin = Math.max(0, Math.round((t1 - p.uptime_secs) / 60));
+      return { axis: agoMin + "", tip: `${agoMin} мин назад` };
+    };
 
     let inner = `<rect x="${padL}" y="${padT}" width="${W - padL - padR}" height="${H - padT - padB}" fill="none" stroke="#999"/>`;
 
@@ -204,24 +236,31 @@ function makeHistoryChart(container, { field, unit, color, flatPad }) {
         `<text class="pt-label" x="${padL - 5}" y="${gy + 4}" text-anchor="end">${v.toFixed(1)}</text>`;
     }
 
-    // Вертикальные метки времени: «Nч/мин назад» относительно последней точки.
-    const span = t1 - t0;
-    const useHours = span >= 7200;
+    // Вертикальные метки времени по выбранной оси.
+    const span = u1 - u0;
+    const useHours = !useWall && span >= 7200;
     const stepsX = Math.min(4, points.length - 1) || 1;
     for (let i = 0; i <= stepsX; i++) {
-      const u = t0 + span * i / stepsX;
+      const u = u0 + span * i / stepsX;
       const gx = x(u);
-      const ago = Math.round((t1 - u) / (useHours ? 3600 : 60));
+      let label;
+      if (useWall) {
+        const d = new Date(u * 1000);
+        label = `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+      } else {
+        const ago = Math.round((t1 - u) / (useHours ? 3600 : 60));
+        label = `${ago}${useHours ? "ч" : "м"}`;
+      }
       inner += `<line x1="${gx}" y1="${padT}" x2="${gx}" y2="${H - padB}" stroke="#f4f4f4"/>` +
-        `<text class="pt-label" x="${gx}" y="${H - padB + 16}" text-anchor="middle">${ago}${useHours ? "ч" : "м"}</text>`;
+        `<text class="pt-label" x="${gx}" y="${H - padB + 16}" text-anchor="middle">${label}</text>`;
     }
 
-    const path = points.map(p => `${x(p.uptime_secs)},${y(p[field])}`).join(" ");
+    const path = points.map(p => `${x(p[key])},${y(p[field])}`).join(" ");
     inner += `<polyline points="${path}" fill="none" stroke="${color}" stroke-width="2"/>`;
     inner += points.map(p => {
-      const agoMin = Math.max(0, Math.round((t1 - p.uptime_secs) / 60));
-      return `<circle cx="${x(p.uptime_secs)}" cy="${y(p[field])}" r="2.5" fill="${color}">` +
-        `<title>${agoMin} мин назад: ${p[field].toFixed(1)} ${unit}</title></circle>`;
+      const f = fmtPoint(p);
+      return `<circle cx="${x(p[key])}" cy="${y(p[field])}" r="2.5" fill="${color}">` +
+        `<title>${f.tip}: ${p[field].toFixed(1)} ${unit}</title></circle>`;
     }).join("");
 
     svg.innerHTML = inner;
@@ -291,7 +330,44 @@ async function refreshHistory() {
   } catch { /* устройство могло переподключаться — попробуем на следующем тике */ }
 }
 
-refreshReadings(); loadCalibration(); refreshHistory();
+async function loadSntp() {
+  try {
+    const r = await fetch("/api/sntp");
+    const d = await r.json();
+    document.getElementById("sntp-current").textContent = d.server;
+    document.getElementById("sntp-src").textContent =
+      "(источник: " + (d.source === "nvs" ? "браузер (NVS)" : "config.toml") + ")";
+    document.getElementById("sntp-server").value = d.server;
+  } catch (e) { sntpMsg("не удалось загрузить настройки SNTP: " + e, true); }
+}
+
+function sntpMsg(text, isErr) {
+  const el = document.getElementById("sntp-msg");
+  el.textContent = text;
+  el.style.color = isErr ? "#c00" : "#080";
+  setTimeout(() => { el.textContent = ""; }, 5000);
+}
+
+document.getElementById("sntp-save").onclick = async () => {
+  const server = document.getElementById("sntp-server").value.trim();
+  try {
+    const r = await fetch("/api/sntp", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ server }) });
+    if (!r.ok) throw new Error((await r.json()).error ?? r.status);
+    sntpMsg("сохранено, применяется в течение минуты");
+    await loadSntp();
+  } catch (e) { sntpMsg("ошибка сохранения: " + e, true); }
+};
+
+document.getElementById("sntp-reset").onclick = async () => {
+  try {
+    const r = await fetch("/api/sntp/reset", { method: "POST" });
+    if (!r.ok) throw new Error((await r.json()).error ?? r.status);
+    sntpMsg("сброшено к config.toml");
+    await loadSntp();
+  } catch (e) { sntpMsg("ошибка сброса: " + e, true); }
+};
+
+refreshReadings(); loadCalibration(); refreshHistory(); loadSntp();
 setInterval(refreshReadings, 2000);
 setInterval(refreshHistory, 60000);
 </script>

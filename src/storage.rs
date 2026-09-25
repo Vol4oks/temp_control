@@ -20,6 +20,9 @@ const KEY_CALIBRATION: &str = "calibration";
 /// Ключ истории (бинарный снапшот, формат — `history::encode_snapshot`).
 const KEY_HISTORY: &str = "history";
 
+/// Ключ NTP-сервера (строка, меняется через веб).
+const KEY_SNTP: &str = "sntp_server";
+
 /// Размер буфера под JSON калибровки (с запасом: ~250 байт фактических).
 const VALUE_BUF_SIZE: usize = 1024;
 
@@ -117,6 +120,46 @@ impl NvsStore {
             .get_blob(KEY_HISTORY, &mut buf)?
             .context("история: ключ исчез между чтениями")?;
         Ok(Some(data.to_vec()))
+    }
+
+    // --- SNTP-сервер ---
+
+    /// Загружает NTP-сервер; `None` — ключа нет (fallback на config.toml).
+    ///
+    /// # Errors
+    /// Возвращает ошибку при сбое NVS.
+    pub fn load_sntp_server(&self) -> Result<Option<String>> {
+        let mut buf = [0u8; 128];
+        match self.lock()?.get_str(KEY_SNTP, &mut buf)? {
+            Some(s) => Ok(Some(s.to_owned())),
+            None => Ok(None),
+        }
+    }
+
+    /// Сохраняет NTP-сервер.
+    ///
+    /// # Errors
+    /// Возвращает ошибку, если запись в NVS не удалась.
+    pub fn save_sntp_server(&self, server: &str) -> Result<()> {
+        self.lock()?.set_str(KEY_SNTP, server).context("запись NVS")
+    }
+
+    /// Удаляет NTP-сервер из NVS (возврат к config.toml).
+    ///
+    /// # Errors
+    /// Возвращает ошибку, если стирание в NVS не удалось.
+    pub fn clear_sntp_server(&self) -> Result<()> {
+        self.lock()?.remove(KEY_SNTP).context("стирание NVS")?;
+        Ok(())
+    }
+
+    /// Есть ли сохранённый NTP-сервер в NVS (для отображения источника).
+    ///
+    /// # Errors
+    /// Возвращает ошибку при сбое NVS.
+    pub fn has_sntp_key(&self) -> Result<bool> {
+        let mut buf = [0u8; 128];
+        Ok(self.lock()?.get_str(KEY_SNTP, &mut buf)?.is_some())
     }
 
     fn lock(&self) -> Result<std::sync::MutexGuard<'_, EspDefaultNvs>> {

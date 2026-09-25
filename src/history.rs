@@ -20,7 +20,7 @@ use std::collections::VecDeque;
 use std::sync::mpsc::{Receiver, RecvTimeoutError};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{ensure, Context, Result};
 use serde::{Deserialize, Serialize};
@@ -37,6 +37,20 @@ pub struct Point {
     pub humidity: f32,
     /// Секунды с момента старта (конец окна усреднения).
     pub uptime_secs: u64,
+    /// Реальное время конца окна (unix, сек); `0` — время ещё не синхронизировано.
+    pub unix_secs: u64,
+}
+
+/// Синхронизированным считаем время позже 2020-01-01: до SNTP-синхронизации
+/// системные часы ESP-IDF идут от 1970-01-01 по uptime.
+const UNIX_SYNCED_MIN: u64 = 1_577_836_800;
+
+/// Реальное время (unix, сек); `0`, если часы ещё не синхронизированы.
+pub fn now_unix() -> u64 {
+    match SystemTime::now().duration_since(UNIX_EPOCH) {
+        Ok(d) if d.as_secs() >= UNIX_SYNCED_MIN => d.as_secs(),
+        _ => 0,
+    }
 }
 
 /// Кольцевой буфер истории.
@@ -84,13 +98,14 @@ impl History {
     }
 }
 
-/// Размер записи точки в снапшоте: f32 + f32 + u32.
-const RECORD_SIZE: usize = 12;
+/// Размер записи точки в снапшоте (THS2): f32 + f32 + u32 + u64.
+const RECORD_SIZE: usize = 20;
 
-/// Метка формата снапшота (версия 1).
-const SNAPSHOT_MAGIC: &[u8; 4] = b"THS1";
+/// Метка формата снапшота (версия 2: добавлено реальное время).
+/// THS1 не читается — при переходе история начинается с нуля.
+const SNAPSHOT_MAGIC: &[u8; 4] = b"THS2";
 
-/// Кодирует кольцо в бинарный блоб: `THS1` + u32 count + записи по 12 байт.
+/// Кодирует кольцо в бинарный блоб: `THS2` + u32 count + записи по 20 байт.
 pub fn encode_snapshot(points: &[Point]) -> Vec<u8> {
     let mut out = Vec::with_capacity(8 + points.len() * RECORD_SIZE);
     out.extend_from_slice(SNAPSHOT_MAGIC);
@@ -99,6 +114,7 @@ pub fn encode_snapshot(points: &[Point]) -> Vec<u8> {
         out.extend_from_slice(&p.temperature.to_le_bytes());
         out.extend_from_slice(&p.humidity.to_le_bytes());
         out.extend_from_slice(&(p.uptime_secs as u32).to_le_bytes());
+        out.extend_from_slice(&p.unix_secs.to_le_bytes());
     }
     out
 }
@@ -143,10 +159,16 @@ pub fn decode_snapshot(bytes: &[u8], cap: usize) -> Result<Vec<Point>> {
                 .try_into()
                 .expect("4 байта выделено"),
         ) as u64;
+        let unix_secs = u64::from_le_bytes(
+            bytes[offset + 12..offset + 20]
+                .try_into()
+                .expect("8 байт выделено"),
+        );
         points.push(Point {
             temperature,
             humidity,
             uptime_secs,
+            unix_secs,
         });
         offset += RECORD_SIZE;
     }
@@ -210,6 +232,7 @@ fn run(
                         temperature: sum_temperature / samples as f32,
                         humidity: sum_humidity / samples as f32,
                         uptime_secs: last_uptime,
+                        unix_secs: now_unix(),
                     };
                     match history.lock() {
                         Ok(mut guard) => guard.push(point),

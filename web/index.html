@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>temp_control</title>
 <style>
-  :root { --line: #ccc; --accent: #2563eb; }
+  :root { --line: #ccc; --accent: #2563eb; --accent2: #059669; }
   body { font-family: system-ui, sans-serif; max-width: 760px; margin: 0 auto; padding: 1rem; color: #111; }
   h1 { font-size: 1.3rem; } h2 { font-size: 1.05rem; margin-top: 1.5rem; }
   .card { border: 1px solid var(--line); border-radius: 8px; padding: 0.75rem 1rem; margin: 0.5rem 0; }
@@ -16,6 +16,7 @@
   button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
   #msg { min-height: 1.2em; font-size: 0.9rem; }
   .grid-wrap { display: flex; gap: 1rem; flex-wrap: wrap; }
+  .grid-wrap > .card { flex: 1 1 300px; }
   svg { touch-action: none; user-select: none; border: 1px solid var(--line); border-radius: 4px; background: #fafafa; }
   .pt-label { font-size: 12px; fill: #444; }
 </style>
@@ -32,11 +33,18 @@
   </div>
 </div>
 
-<h2>История температуры</h2>
-<div class="card">
-  <div id="chart-t"></div>
-  <div class="muted">Среднее за окно (см. point_secs), обновление раз в минуту.</div>
+<h2>История</h2>
+<div class="grid-wrap">
+  <div class="card">
+    <strong>Температура, °C</strong>
+    <div id="chart-t"></div>
+  </div>
+  <div class="card">
+    <strong>Влажность, %</strong>
+    <div id="chart-h"></div>
+  </div>
 </div>
+<div class="muted">Среднее за окно усреднения; обновление раз в минуту.</div>
 
 <h2>Калибровка</h2>
 <p class="muted">
@@ -144,11 +152,16 @@ function makeGrid(container, channel, range) {
 const gridT = makeGrid(document.getElementById("grid-t"), "temperature", RANGES.t);
 const gridH = makeGrid(document.getElementById("grid-h"), "humidity", RANGES.h);
 
-const chartT = makeHistoryChart(document.getElementById("chart-t"));
+const chartT = makeHistoryChart(document.getElementById("chart-t"), {
+  field: "temperature", unit: "°C", color: "var(--accent)", flatPad: 1,
+});
+const chartH = makeHistoryChart(document.getElementById("chart-h"), {
+  field: "humidity", unit: "%", color: "var(--accent2)", flatPad: 2,
+});
 
-function makeHistoryChart(container) {
-  const W = 700, H = 260;
-  const padL = 46, padR = 14, padT = 14, padB = 30;
+function makeHistoryChart(container, { field, unit, color, flatPad }) {
+  const W = 360, H = 240;
+  const padL = 40, padR = 10, padT = 12, padB = 30;
 
   function setData(points, pointSecs) {
     container.innerHTML = "";
@@ -164,12 +177,12 @@ function makeHistoryChart(container) {
     svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
     svg.setAttribute("width", "100%");
 
-    // Вертикаль: авто-масштаб с запасом; при плоской серии — ±1 вокруг среднего.
-    const temps = points.map(p => p.temperature);
-    let min = Math.min(...temps), max = Math.max(...temps);
-    if (max - min < 2) {
+    // Вертикаль: авто-масштаб с запасом; при плоской серии — ±flatPad вокруг среднего.
+    const values = points.map(p => p[field]);
+    let min = Math.min(...values), max = Math.max(...values);
+    if (max - min < 2 * flatPad) {
       const mid = (max + min) / 2;
-      min = mid - 1; max = mid + 1;
+      min = mid - flatPad; max = mid + flatPad;
     } else {
       min = Math.floor(min - 0.5);
       max = Math.ceil(max + 0.5);
@@ -182,19 +195,19 @@ function makeHistoryChart(container) {
 
     let inner = `<rect x="${padL}" y="${padT}" width="${W - padL - padR}" height="${H - padT - padB}" fill="none" stroke="#999"/>`;
 
-    // Горизонтальная сетка с подписями °C.
+    // Горизонтальная сетка с подписями значений.
     const stepsY = 4;
     for (let i = 0; i <= stepsY; i++) {
       const v = min + (max - min) * i / stepsY;
       const gy = y(v);
       inner += `<line x1="${padL}" y1="${gy}" x2="${W - padR}" y2="${gy}" stroke="#eee"/>` +
-        `<text class="pt-label" x="${padL - 6}" y="${gy + 4}" text-anchor="end">${v.toFixed(1)}</text>`;
+        `<text class="pt-label" x="${padL - 5}" y="${gy + 4}" text-anchor="end">${v.toFixed(1)}</text>`;
     }
 
     // Вертикальные метки времени: «Nч/мин назад» относительно последней точки.
     const span = t1 - t0;
     const useHours = span >= 7200;
-    const stepsX = Math.min(6, points.length - 1) || 1;
+    const stepsX = Math.min(4, points.length - 1) || 1;
     for (let i = 0; i <= stepsX; i++) {
       const u = t0 + span * i / stepsX;
       const gx = x(u);
@@ -203,12 +216,12 @@ function makeHistoryChart(container) {
         `<text class="pt-label" x="${gx}" y="${H - padB + 16}" text-anchor="middle">${ago}${useHours ? "ч" : "м"}</text>`;
     }
 
-    const path = points.map(p => `${x(p.uptime_secs)},${y(p.temperature)}`).join(" ");
-    inner += `<polyline points="${path}" fill="none" stroke="var(--accent)" stroke-width="2"/>`;
+    const path = points.map(p => `${x(p.uptime_secs)},${y(p[field])}`).join(" ");
+    inner += `<polyline points="${path}" fill="none" stroke="${color}" stroke-width="2"/>`;
     inner += points.map(p => {
       const agoMin = Math.max(0, Math.round((t1 - p.uptime_secs) / 60));
-      return `<circle cx="${x(p.uptime_secs)}" cy="${y(p.temperature)}" r="2.5" fill="var(--accent)">` +
-        `<title>${agoMin} мин назад: ${p.temperature.toFixed(1)} °C</title></circle>`;
+      return `<circle cx="${x(p.uptime_secs)}" cy="${y(p[field])}" r="2.5" fill="${color}">` +
+        `<title>${agoMin} мин назад: ${p[field].toFixed(1)} ${unit}</title></circle>`;
     }).join("");
 
     svg.innerHTML = inner;
@@ -272,7 +285,9 @@ async function refreshHistory() {
   try {
     const r = await fetch("/api/history");
     const d = await r.json();
-    chartT.setData(d.points ?? [], d.point_secs ?? 300);
+    const points = d.points ?? [];
+    chartT.setData(points, d.point_secs ?? 300);
+    chartH.setData(points, d.point_secs ?? 300);
   } catch { /* устройство могло переподключаться — попробуем на следующем тике */ }
 }
 

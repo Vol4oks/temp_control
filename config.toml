@@ -14,10 +14,11 @@ height = 64
 [intervals]
 sensor_poll_secs = 2
 display_refresh_secs = 1
-history_save_secs = 60
+history_point_secs = 300   # окно усреднения истории (точка раз в 5 минут)
+history_save_secs = 3600   # снапшот кольца истории в NVS (раз в час)
 
 [history]
-max_points = 240  # глубина истории (см. docs/QUESTIONS.md ОВ-3)
+max_points = 288   # 288 × 5 мин = 24 часа (см. docs/QUESTIONS.md ОВ-3)
 
 [calibration]
 # Двухточечная калибровка: пары «показал датчик → реально есть».

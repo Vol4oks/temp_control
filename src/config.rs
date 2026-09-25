@@ -88,7 +88,20 @@ pub struct Display {
 pub struct Intervals {
     pub sensor_poll_secs: u64,
     pub display_refresh_secs: u64,
+    /// Окно усреднения истории.
+    #[serde(default = "default_history_point_secs")]
+    pub history_point_secs: u64,
+    /// Период снапшота истории в NVS.
+    #[serde(default = "default_history_save_secs")]
     pub history_save_secs: u64,
+}
+
+fn default_history_point_secs() -> u64 {
+    300
+}
+
+fn default_history_save_secs() -> u64 {
+    3600
 }
 
 /// Параметры истории измерений.
@@ -139,7 +152,8 @@ pub fn load() -> anyhow::Result<(Config, Secrets)> {
     anyhow::ensure!(
         config.intervals.sensor_poll_secs > 0
             && config.intervals.display_refresh_secs > 0
-            && config.intervals.history_save_secs > 0,
+            && config.intervals.history_save_secs > 0
+            && config.intervals.history_point_secs > 0,
         "все intervals.*_secs должны быть больше нуля"
     );
 

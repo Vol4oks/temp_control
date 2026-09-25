@@ -1,6 +1,7 @@
 mod calibration;
 mod config;
 mod display;
+mod history;
 mod net;
 mod pins;
 mod sensor;
@@ -52,17 +53,42 @@ fn main() -> anyhow::Result<()> {
 
     let nvs_partition = EspDefaultNvsPartition::take().context("NVS partition")?;
 
-    // Калибровка: NVS поверх config.toml (браузер имеет приоритет).
-    let store = Arc::new(storage::CalibrationStore::new(nvs_partition.clone())?);
+    // Хранилище NVS: калибровка + история (снапшоты).
+    let store = Arc::new(storage::NvsStore::new(nvs_partition.clone())?);
     let config_calibration = calibration::Calibration::try_from(&config.calibration)
         .context("секция [calibration] в config.toml")?;
-    let calibration = Arc::new(Mutex::new(match store.load()? {
+    let calibration = Arc::new(Mutex::new(match store.load_calibration()? {
         Some(saved) => {
             log::info!("калибровка загружена из NVS");
             saved
         }
         None => config_calibration,
     }));
+
+    // История: кольцо в RAM + снапшот из NVS при наличии.
+    let history = Arc::new(Mutex::new(history::History::with_capacity(
+        config.history.max_points,
+    )));
+    match store.load_history()? {
+        Some(bytes) => match history::decode_snapshot(&bytes, config.history.max_points) {
+            Ok(points) => {
+                match history.lock() {
+                    Ok(mut guard) => guard.restore(points),
+                    Err(poisoned) => poisoned.into_inner().restore(points),
+                }
+                log::info!("история восстановлена из NVS");
+            }
+            Err(e) => log::warn!("история в NVS не читается ({e:#}) — начинаем заново"),
+        },
+        None => log::info!("снапшота истории нет — начинаем с пустого кольца"),
+    }
+
+    anyhow::ensure!(
+        config.intervals.history_point_secs >= config.intervals.sensor_poll_secs,
+        "intervals.history_point_secs ({}) должен быть не меньше периода опроса ({})",
+        config.intervals.history_point_secs,
+        config.intervals.sensor_poll_secs
+    );
 
     let net_status = Arc::new(Mutex::new(net::NetStatus::default()));
     let _wifi_task = net::start(
@@ -72,15 +98,27 @@ fn main() -> anyhow::Result<()> {
         Arc::clone(&net_status),
     )?;
 
-    // По каналу на подписчика: экран и веб.
+    // По каналу на подписчика: экран, веб, логгер истории.
     let (tx_display, rx_display) = mpsc::channel::<sensor::Reading>();
     let (tx_web, rx_web) = mpsc::channel::<sensor::Reading>();
+    let (tx_logging, rx_logging) = mpsc::channel::<sensor::Reading>();
 
     let _sensor_task = sensor::start(
         device_pins.dht11_data,
         Duration::from_secs(config.intervals.sensor_poll_secs),
-        vec![tx_display, tx_web],
+        vec![tx_display, tx_web, tx_logging],
         Arc::clone(&calibration),
+    )?;
+
+    let _logging_task = history::start(
+        rx_logging,
+        Arc::clone(&history),
+        Arc::clone(&store),
+        history::LoggingParams {
+            window_samples: (config.intervals.history_point_secs
+                / config.intervals.sensor_poll_secs) as u32,
+            snapshot_interval: Duration::from_secs(config.intervals.history_save_secs),
+        },
     )?;
 
     let _display_task = display::start(
@@ -101,6 +139,8 @@ fn main() -> anyhow::Result<()> {
         config_calibration,
         store,
         net: net_status,
+        history,
+        history_point_secs: config.intervals.history_point_secs,
     })?;
     log::info!("web: HTTP-сервер запущен на порту 80");
 

@@ -32,6 +32,12 @@
   </div>
 </div>
 
+<h2>История температуры</h2>
+<div class="card">
+  <div id="chart-t"></div>
+  <div class="muted">Среднее за окно (см. point_secs), обновление раз в минуту.</div>
+</div>
+
 <h2>Калибровка</h2>
 <p class="muted">
   Перетащите точки: X — что показал датчик, Y — реальное значение (эталон).
@@ -138,6 +144,80 @@ function makeGrid(container, channel, range) {
 const gridT = makeGrid(document.getElementById("grid-t"), "temperature", RANGES.t);
 const gridH = makeGrid(document.getElementById("grid-h"), "humidity", RANGES.h);
 
+const chartT = makeHistoryChart(document.getElementById("chart-t"));
+
+function makeHistoryChart(container) {
+  const W = 700, H = 260;
+  const padL = 46, padR = 14, padT = 14, padB = 30;
+
+  function setData(points, pointSecs) {
+    container.innerHTML = "";
+    if (!Array.isArray(points) || points.length === 0) {
+      const empty = document.createElement("div");
+      empty.className = "muted";
+      empty.textContent = "История собирается — первая точка через окно усреднения.";
+      container.append(empty);
+      return;
+    }
+
+    const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
+    svg.setAttribute("width", "100%");
+
+    // Вертикаль: авто-масштаб с запасом; при плоской серии — ±1 вокруг среднего.
+    const temps = points.map(p => p.temperature);
+    let min = Math.min(...temps), max = Math.max(...temps);
+    if (max - min < 2) {
+      const mid = (max + min) / 2;
+      min = mid - 1; max = mid + 1;
+    } else {
+      min = Math.floor(min - 0.5);
+      max = Math.ceil(max + 0.5);
+    }
+
+    const t0 = points[0].uptime_secs;
+    const t1 = points[points.length - 1].uptime_secs || t0 + 1;
+    const x = u => padL + (u - t0) / (t1 - t0 || 1) * (W - padL - padR);
+    const y = v => padT + (max - v) / (max - min) * (H - padT - padB);
+
+    let inner = `<rect x="${padL}" y="${padT}" width="${W - padL - padR}" height="${H - padT - padB}" fill="none" stroke="#999"/>`;
+
+    // Горизонтальная сетка с подписями °C.
+    const stepsY = 4;
+    for (let i = 0; i <= stepsY; i++) {
+      const v = min + (max - min) * i / stepsY;
+      const gy = y(v);
+      inner += `<line x1="${padL}" y1="${gy}" x2="${W - padR}" y2="${gy}" stroke="#eee"/>` +
+        `<text class="pt-label" x="${padL - 6}" y="${gy + 4}" text-anchor="end">${v.toFixed(1)}</text>`;
+    }
+
+    // Вертикальные метки времени: «Nч/мин назад» относительно последней точки.
+    const span = t1 - t0;
+    const useHours = span >= 7200;
+    const stepsX = Math.min(6, points.length - 1) || 1;
+    for (let i = 0; i <= stepsX; i++) {
+      const u = t0 + span * i / stepsX;
+      const gx = x(u);
+      const ago = Math.round((t1 - u) / (useHours ? 3600 : 60));
+      inner += `<line x1="${gx}" y1="${padT}" x2="${gx}" y2="${H - padB}" stroke="#f4f4f4"/>` +
+        `<text class="pt-label" x="${gx}" y="${H - padB + 16}" text-anchor="middle">${ago}${useHours ? "ч" : "м"}</text>`;
+    }
+
+    const path = points.map(p => `${x(p.uptime_secs)},${y(p.temperature)}`).join(" ");
+    inner += `<polyline points="${path}" fill="none" stroke="var(--accent)" stroke-width="2"/>`;
+    inner += points.map(p => {
+      const agoMin = Math.max(0, Math.round((t1 - p.uptime_secs) / 60));
+      return `<circle cx="${x(p.uptime_secs)}" cy="${y(p.temperature)}" r="2.5" fill="var(--accent)">` +
+        `<title>${agoMin} мин назад: ${p.temperature.toFixed(1)} °C</title></circle>`;
+    }).join("");
+
+    svg.innerHTML = inner;
+    container.append(svg);
+  }
+
+  return { setData };
+}
+
 function msg(text, isErr) {
   const el = document.getElementById("msg");
   el.textContent = text;
@@ -188,8 +268,17 @@ document.getElementById("reset").onclick = async () => {
   } catch (e) { msg("ошибка сброса: " + e, true); }
 };
 
-refreshReadings(); loadCalibration();
+async function refreshHistory() {
+  try {
+    const r = await fetch("/api/history");
+    const d = await r.json();
+    chartT.setData(d.points ?? [], d.point_secs ?? 300);
+  } catch { /* устройство могло переподключаться — попробуем на следующем тике */ }
+}
+
+refreshReadings(); loadCalibration(); refreshHistory();
 setInterval(refreshReadings, 2000);
+setInterval(refreshHistory, 60000);
 </script>
 </body>
 </html>

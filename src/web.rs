@@ -22,9 +22,10 @@ use esp_idf_svc::io::{Read, Write};
 use serde_json::json;
 
 use crate::calibration::Calibration;
+use crate::history::History;
 use crate::net::NetStatus;
 use crate::sensor::Reading;
-use crate::storage::CalibrationStore;
+use crate::storage::NvsStore;
 
 /// Ограничение тела POST-запросов (JSON калибровки ~250 байт).
 const MAX_BODY_LEN: usize = 2048;
@@ -37,10 +38,14 @@ pub struct WebState {
     pub calibration: Arc<Mutex<Calibration>>,
     /// Калибровка из config.toml — цель для `POST /api/calibration/reset`.
     pub config_calibration: Calibration,
-    /// Хранилище калибровки в NVS.
-    pub store: Arc<CalibrationStore>,
+    /// Хранилище NVS (калибровка + история).
+    pub store: Arc<NvsStore>,
     /// Сетевой статус (IP) — виден на странице.
     pub net: Arc<Mutex<NetStatus>>,
+    /// Кольцо истории (заполняет logging_task).
+    pub history: Arc<Mutex<History>>,
+    /// Период точки истории (для фронтенда).
+    pub history_point_secs: u64,
 }
 
 /// Запускает поток-насос: канал сенсора → `latest` для HTTP-хендлеров.
@@ -106,7 +111,7 @@ pub fn start_server(state: WebState) -> Result<EspHttpServer<'static>> {
     let cal_store = state.store.clone();
     server.fn_handler::<anyhow::Error, _>("/api/calibration", Method::Get, move |req| {
         let calibration = clone_calibration(&cal_state);
-        let source = if cal_store.has_key()? {
+        let source = if cal_store.has_calibration_key()? {
             "nvs"
         } else {
             "config"
@@ -133,7 +138,7 @@ pub fn start_server(state: WebState) -> Result<EspHttpServer<'static>> {
 
         // Сначала сохраняем в NVS, затем применяем: калибровка применяется
         // только если запись прошла, иначе состояние разъедется с хранилищем.
-        cal_store.save(&proposed)?;
+        cal_store.save_calibration(&proposed)?;
         match cal_state.lock() {
             Ok(mut guard) => *guard = proposed,
             Err(poisoned) => *poisoned.into_inner() = proposed,
@@ -146,13 +151,27 @@ pub fn start_server(state: WebState) -> Result<EspHttpServer<'static>> {
     let cal_store = state.store.clone();
     let config_calibration = state.config_calibration;
     server.fn_handler::<anyhow::Error, _>("/api/calibration/reset", Method::Post, move |req| {
-        cal_store.clear()?;
+        cal_store.clear_calibration()?;
         match cal_state.lock() {
             Ok(mut guard) => *guard = config_calibration,
             Err(poisoned) => *poisoned.into_inner() = config_calibration,
         }
         log::info!("web: калибровка сброшена к config.toml");
         respond_json(req, 200, &json!({ "ok": true }))
+    })?;
+
+    let history_state = state.history.clone();
+    let history_point_secs = state.history_point_secs;
+    server.fn_handler::<anyhow::Error, _>("/api/history", Method::Get, move |req| {
+        let points = match history_state.lock() {
+            Ok(guard) => guard.points(),
+            Err(poisoned) => poisoned.into_inner().points(),
+        };
+        respond_json(
+            req,
+            200,
+            &json!({ "point_secs": history_point_secs, "points": points }),
+        )
     })?;
 
     Ok(server)

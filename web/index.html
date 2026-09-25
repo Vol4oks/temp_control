@@ -1,0 +1,195 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>temp_control</title>
+<style>
+  :root { --line: #ccc; --accent: #2563eb; }
+  body { font-family: system-ui, sans-serif; max-width: 760px; margin: 0 auto; padding: 1rem; color: #111; }
+  h1 { font-size: 1.3rem; } h2 { font-size: 1.05rem; margin-top: 1.5rem; }
+  .card { border: 1px solid var(--line); border-radius: 8px; padding: 0.75rem 1rem; margin: 0.5rem 0; }
+  .muted { color: #666; font-size: 0.85rem; }
+  .row { display: flex; gap: 1rem; flex-wrap: wrap; align-items: center; }
+  .value { font-size: 1.6rem; font-variant-numeric: tabular-nums; }
+  button { padding: 0.5rem 1rem; border: 1px solid var(--line); border-radius: 6px; background: #fff; cursor: pointer; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  #msg { min-height: 1.2em; font-size: 0.9rem; }
+  .grid-wrap { display: flex; gap: 1rem; flex-wrap: wrap; }
+  svg { touch-action: none; user-select: none; border: 1px solid var(--line); border-radius: 4px; background: #fafafa; }
+  .pt-label { font-size: 12px; fill: #444; }
+</style>
+</head>
+<body>
+<h1>temp_control</h1>
+
+<div class="card">
+  <div class="row">
+    <div><div class="muted">Температура</div><div class="value" id="t">--</div></div>
+    <div><div class="muted">Влажность</div><div class="value" id="h">--</div></div>
+    <div><div class="muted">IP</div><div class="value" id="ip">--</div></div>
+    <div><div class="muted">Uptime</div><div class="value" id="up">--</div></div>
+  </div>
+</div>
+
+<h2>Калибровка</h2>
+<p class="muted">
+  Перетащите точки: X — что показал датчик, Y — реальное значение (эталон).
+  Берите точки в заметно разных условиях. Пунктир — линия «без калибровки».
+</p>
+<div class="grid-wrap">
+  <div class="card">
+    <strong>Температура, °C (0…50)</strong>
+    <div id="grid-t"></div>
+  </div>
+  <div class="card">
+    <strong>Влажность, % (0…100)</strong>
+    <div id="grid-h"></div>
+  </div>
+</div>
+<div class="row">
+  <span class="muted" id="src"></span>
+  <button class="primary" id="save">Сохранить</button>
+  <button id="reset">Сбросить к конфигу</button>
+  <span id="msg"></span>
+</div>
+
+<script>
+"use strict";
+const RANGES = { t: { min: 0, max: 50 }, h: { min: 0, max: 100 } };
+
+function makeGrid(container, channel, range) {
+  const size = 300, pad = 34;
+  const x = v => pad + (v - range.min) / (range.max - range.min) * (size - 2 * pad);
+  const y = v => size - pad - (v - range.min) / (range.max - range.min) * (size - 2 * pad);
+  const val = (px, py) => ({
+    measured: Math.round((range.min + (px - pad) / (size - 2 * pad) * (range.max - range.min)) * 10) / 10,
+    real: Math.round((range.min + (size - pad - py) / (size - 2 * pad) * (range.max - range.min)) * 10) / 10,
+  });
+
+  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  svg.setAttribute("width", size); svg.setAttribute("height", size);
+  svg.setAttribute("viewBox", `0 0 ${size} ${size}`);
+
+  let ticks = 5;
+  for (let i = 0; i <= ticks; i++) {
+    const v = range.min + (range.max - range.min) * i / ticks;
+    const gx = x(v), gy = y(v);
+    svg.innerHTML += `<line x1="${gx}" y1="${pad}" x2="${gx}" y2="${size - pad}" stroke="#eee"/>` +
+      `<line x1="${pad}" y1="${gy}" x2="${size - pad}" y2="${gy}" stroke="#eee"/>` +
+      `<text class="pt-label" x="${gx - 8}" y="${size - pad + 14}">${v.toFixed(0)}</text>` +
+      `<text class="pt-label" x="${pad - 26}" y="${gy + 4}">${v.toFixed(0)}</text>`;
+  }
+  svg.innerHTML += `<rect x="${pad}" y="${pad}" width="${size - 2 * pad}" height="${size - 2 * pad}" fill="none" stroke="#999"/>` +
+    `<text class="pt-label" x="${size / 2 - 40}" y="${size - 4}">показал датчик →</text>` +
+    `<text class="pt-label" x="4" y="${size / 2}" transform="rotate(-90 10 ${size / 2})">реально →</text>`;
+
+  const diag = document.createElementNS("http://www.w3.org/2000/svg", "line");
+  diag.setAttribute("stroke", "#bbb"); diag.setAttribute("stroke-dasharray", "4 4");
+  const calib = document.createElementNS("http://www.w3.org/2000/svg", "line");
+  calib.setAttribute("stroke", "var(--accent)"); calib.setAttribute("stroke-width", "2");
+  svg.append(diag, calib);
+
+  const state = { point1: { measured: 0, real: 0 }, point2: { measured: 1, real: 1 } };
+  const circles = [1, 2].map(n => {
+    const c = document.createElementNS("http://www.w3.org/2000/svg", "circle");
+    c.setAttribute("r", 9); c.setAttribute("fill", "var(--accent)"); c.setAttribute("data-n", n);
+    c.style.cursor = "grab";
+    svg.append(c);
+    return c;
+  });
+
+  function redraw() {
+    for (const [i, key] of [["1", "point1"], ["2", "point2"]]) {
+      const p = state[key];
+      const c = circles[Number(i) - 1];
+      c.setAttribute("cx", x(p.measured)); c.setAttribute("cy", y(p.real));
+      c.setAttribute("title", `точка ${i}: показал ${p.measured} → реально ${p.real}`);
+    }
+    diag.setAttribute("x1", x(range.min)); diag.setAttribute("y1", y(range.min));
+    diag.setAttribute("x2", x(range.max)); diag.setAttribute("y2", y(range.max));
+    calib.setAttribute("x1", x(state.point1.measured)); calib.setAttribute("y1", y(state.point1.real));
+    calib.setAttribute("x2", x(state.point2.measured)); calib.setAttribute("y2", y(state.point2.real));
+  }
+
+  let drag = null;
+  svg.addEventListener("pointerdown", e => {
+    const t = e.target;
+    if (t.dataset && t.dataset.n) { drag = t.dataset.n === "1" ? "point1" : "point2"; svg.setPointerCapture(e.pointerId); }
+  });
+  svg.addEventListener("pointermove", e => {
+    if (!drag) return;
+    const rect = svg.getBoundingClientRect();
+    const scale = size / rect.width;
+    const p = val((e.clientX - rect.left) * scale, (e.clientY - rect.top) * scale);
+    p.measured = Math.min(range.max, Math.max(range.min, p.measured));
+    p.real = Math.min(range.max, Math.max(range.min, p.real));
+    state[drag] = p; redraw();
+  });
+  svg.addEventListener("pointerup", () => drag = null);
+
+  container.append(svg);
+  return {
+    get: () => ({ point1: { ...state.point1 }, point2: { ...state.point2 } }),
+    set: points => { state.point1 = points.point1; state.point2 = points.point2; redraw(); },
+  };
+}
+
+const gridT = makeGrid(document.getElementById("grid-t"), "temperature", RANGES.t);
+const gridH = makeGrid(document.getElementById("grid-h"), "humidity", RANGES.h);
+
+function msg(text, isErr) {
+  const el = document.getElementById("msg");
+  el.textContent = text;
+  el.style.color = isErr ? "#c00" : "#080";
+  setTimeout(() => { el.textContent = ""; }, 5000);
+}
+
+async function refreshReadings() {
+  try {
+    const r = await fetch("/api/temperature");
+    const d = await r.json();
+    document.getElementById("t").textContent = d.temperature == null ? "--" : d.temperature.toFixed(1) + " °C";
+    document.getElementById("h").textContent = d.humidity == null ? "--" : d.humidity.toFixed(1) + " %";
+    document.getElementById("ip").textContent = d.ip ?? "--";
+    document.getElementById("up").textContent = d.uptime_secs == null ? "--" : d.uptime_secs + " с";
+  } catch { /* устройство могло переподключаться — попробуем на следующем тике */ }
+}
+
+async function loadCalibration() {
+  try {
+    const r = await fetch("/api/calibration");
+    const d = await r.json();
+    gridT.set(d.temperature); gridH.set(d.humidity);
+    document.getElementById("src").textContent = "источник: " + (d.source === "nvs" ? "браузер (NVS)" : "config.toml");
+  } catch (e) { msg("не удалось загрузить калибровку: " + e, true); }
+}
+
+document.getElementById("save").onclick = async () => {
+  const body = { temperature: gridT.get(), humidity: gridH.get() };
+  const p1 = body.temperature.point1, p2 = body.temperature.point2;
+  const h1 = body.humidity.point1, h2 = body.humidity.point2;
+  if (p1.measured === p2.measured || h1.measured === h2.measured) {
+    msg("точки одного канала не должны совпадать по оси X", true);
+    return;
+  }
+  try {
+    const r = await fetch("/api/calibration", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+    if (!r.ok) throw new Error((await r.json()).error ?? r.status);
+    msg("сохранено"); await loadCalibration();
+  } catch (e) { msg("ошибка сохранения: " + e, true); }
+};
+
+document.getElementById("reset").onclick = async () => {
+  try {
+    const r = await fetch("/api/calibration/reset", { method: "POST" });
+    if (!r.ok) throw new Error((await r.json()).error ?? r.status);
+    msg("сброшено к config.toml"); await loadCalibration();
+  } catch (e) { msg("ошибка сброса: " + e, true); }
+};
+
+refreshReadings(); loadCalibration();
+setInterval(refreshReadings, 2000);
+</script>
+</body>
+</html>

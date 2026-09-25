@@ -9,6 +9,7 @@
 //! IP-адрес до Этапа 4 (Wi-Fi) неизвестен — рисуем плейсхолдер.
 
 use std::sync::mpsc::Receiver;
+use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
@@ -25,6 +26,7 @@ use ssd1306::mode::{BufferedGraphicsMode, DisplayConfig as _};
 use ssd1306::{prelude::*, I2CDisplayInterface, Ssd1306};
 
 use crate::config::Display as DisplaySettings;
+use crate::net::NetStatus;
 use crate::sensor::Reading;
 
 /// Тип дисплея. Размер — параметр компиляции (`DisplaySize128x64`);
@@ -54,6 +56,7 @@ pub fn start(
     cfg: &DisplaySettings,
     refresh: Duration,
     rx: Receiver<Reading>,
+    net_status: Arc<Mutex<NetStatus>>,
 ) -> Result<JoinHandle<()>> {
     ensure!(
         cfg.width == WIDTH && cfg.height == HEIGHT,
@@ -72,7 +75,7 @@ pub fn start(
     thread::Builder::new()
         .name("display_task".into())
         .stack_size(THREAD_STACK_SIZE)
-        .spawn(move || run(i2c, sda, scl, cfg, refresh, rx))
+        .spawn(move || run(i2c, sda, scl, cfg, refresh, rx, net_status))
         .context("не удалось запустить поток display_task")
 }
 
@@ -83,6 +86,7 @@ fn run(
     cfg: DisplaySettings,
     refresh: Duration,
     rx: Receiver<Reading>,
+    net_status: Arc<Mutex<NetStatus>>,
 ) {
     let mut display = match init(i2c, sda, scl, &cfg) {
         Ok(display) => display,
@@ -109,7 +113,7 @@ fn run(
 
         display.clear_buffer();
         draw_values(&mut display, latest.as_ref(), big);
-        draw_net_line(&mut display, small);
+        draw_net_line(&mut display, &net_status, small);
         if let Err(e) = display.flush() {
             log::warn!("display_task: не удалось вывести кадр: {e:?}");
         }
@@ -162,10 +166,22 @@ fn draw_values(
     draw_text(display, &hum, Point::new(0, 22), style);
 }
 
-/// Строка сети внизу экрана. До Этапа 4 адрес неизвестен.
-fn draw_net_line(display: &mut Display, style: MonoTextStyle<BinaryColor>) {
-    // TODO(этап 4): реальный IP из Wi-Fi-инициализации (docs/PLAN.md, Этап 4)
-    draw_text(display, "IP: ---", Point::new(0, 54), style);
+/// Строка сети внизу экрана: IP после подключения Wi-Fi, плейсхолдер до него.
+fn draw_net_line(
+    display: &mut Display,
+    net_status: &Arc<Mutex<NetStatus>>,
+    style: MonoTextStyle<BinaryColor>,
+) {
+    // Мьютекс держим микросекунды — копируем IP и отпускаем.
+    let ip = match net_status.lock() {
+        Ok(status) => status.ip.clone(),
+        Err(poisoned) => poisoned.into_inner().ip.clone(),
+    };
+    let line = match ip {
+        Some(ip) => format!("IP: {ip}"),
+        None => "IP: ---".to_owned(),
+    };
+    draw_text(display, &line, Point::new(0, 54), style);
 }
 
 fn draw_text(display: &mut Display, text: &str, pos: Point, style: MonoTextStyle<BinaryColor>) {

@@ -53,18 +53,24 @@
 - [ ] Проверка на железе
 - [ ] После Этапа 4 — реальный IP (передаётся в `display_task` из Wi-Fi-инициализации)
 
-## Этап 4. Wi-Fi + HTTP-сервер ⬜
+## Этап 4. Wi-Fi + HTTP-сервер ✅
 
-- [ ] Подключение Wi-Fi STA, ожидание получения IP
-- [ ] После получения IP — передать адрес в `display_task` (см. Этап 3)
-- [ ] `web_server_task`: HTTP-сервер на 80 порту
-- [ ] `GET /` — HTML-интерфейс
-- [ ] `GET /api/temperature` — JSON
-- [ ] `GET /api/history` — JSON
+- [x] Подключение Wi-Fi STA, ожидание получения IP (`net.rs`, keepalive-поток с переподключением)
+- [x] После получения IP — передать адрес в `display_task` (`Arc<Mutex<NetStatus>>`)
+- [x] `web_server_task`: HTTP-сервер на 80 порту (`web.rs`, `EspHttpServer`)
+- [x] `GET /` — HTML-интерфейс (`web/index.html`, запечён в прошивку)
+- [x] `GET /api/temperature` — JSON (raw + calibrated + uptime + IP)
+- [x] `GET /api/calibration` — активные точки + источник (nvs | config)
+- [x] `POST /api/calibration` — валидация → запись в NVS → применение; `POST /api/calibration/reset`
+- [x] Веб-UI: сетка с перетаскиваемыми точками (T 0…50 °C, H 0…100 %), линия идентичности пунктиром, кнопки Сохранить/Сбросить
+- [x] Калибровка переживает перезагрузку (NVS, приоритет над config.toml)
+- [x] Проверка clippy/fmt
+- [ ] Проверка на железе
 
 ## Этап 5. История в NVS ⬜
 
-- [ ] `logging_task`: сохранение раз в 60 сек
+- [ ] `logging_task`: сохранение раз в 60 сек (@embedded-systems: нюансы износа NVS)
+- [ ] `GET /api/history` — JSON истории (перенесён из Этапа 4)
 - [ ] Формат хранения (см. открытые вопросы ОВ-3)
 - [ ] Ограничение глубины истории
 

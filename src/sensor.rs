@@ -15,11 +15,12 @@ use anyhow::{Context, Result};
 use embedded_dht_rs::dht11::Dht11;
 use esp_idf_hal::delay::Delay;
 use esp_idf_hal::gpio::{AnyIOPin, PinDriver, Pull};
+use serde::Serialize;
 
 use crate::calibration::Calibration;
 
 /// Одно измерение датчика.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
 pub struct Reading {
     /// Температура после калибровки, °C.
     pub temperature: f32,
@@ -40,28 +41,31 @@ const THREAD_STACK_SIZE: usize = 8192;
 
 /// Запускает `sensor_task` в отдельном потоке.
 ///
+/// `senders` — по каналу на каждого подписчика (экран, веб); рассылка
+/// «последнему ценному» подписчику не блокирует остальных, каналы закрытых
+/// подписчиков выпадают из рассылки.
 /// `calibration` — общее состояние: `sensor_task` читает его раз в цикл,
-/// веб-задача (Этап 4) будет обновлять из браузера.
+/// веб-задача обновляет из браузера.
 ///
 /// # Errors
 /// Возвращает ошибку, если поток не удалось создать.
 pub fn start(
     pin: AnyIOPin<'static>,
     poll: Duration,
-    tx: Sender<Reading>,
+    senders: Vec<Sender<Reading>>,
     calibration: Arc<Mutex<Calibration>>,
 ) -> Result<JoinHandle<()>> {
     thread::Builder::new()
         .name("sensor_task".into())
         .stack_size(THREAD_STACK_SIZE)
-        .spawn(move || run(pin, poll, tx, calibration))
+        .spawn(move || run(pin, poll, senders, calibration))
         .context("не удалось запустить поток sensor_task")
 }
 
 fn run(
     pin: AnyIOPin<'static>,
     poll: Duration,
-    tx: Sender<Reading>,
+    tx: Vec<Sender<Reading>>,
     calibration: Arc<Mutex<Calibration>>,
 ) {
     let started = Instant::now();
@@ -77,7 +81,11 @@ fn run(
     };
     let mut dht = Dht11::new(pin_driver, Delay::default());
 
-    log::info!("sensor_task: запущен, период опроса {poll:?}");
+    let mut senders = tx;
+    log::info!(
+        "sensor_task: запущен, период опроса {poll:?}, подписчиков {}",
+        senders.len()
+    );
 
     loop {
         // Пауза и до первого чтения: DHT11 нужен ~1 сек после подачи питания.
@@ -110,8 +118,10 @@ fn run(
                     reading.raw_humidity,
                     reading.uptime_secs
                 );
-                // Канал закрыт — подписчиков больше нет, завершаем поток.
-                if tx.send(reading).is_err() {
+                // Каналы закрытых подписчиков выпадают из рассылки;
+                // сенсор умирает, только когда подписчиков не осталось.
+                senders.retain(|tx| tx.send(reading).is_ok());
+                if senders.is_empty() {
                     log::info!("sensor_task: получателей нет, поток завершается");
                     return;
                 }

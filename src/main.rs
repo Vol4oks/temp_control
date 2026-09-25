@@ -1,14 +1,18 @@
 mod calibration;
 mod config;
 mod display;
+mod net;
 mod pins;
 mod sensor;
+mod storage;
+mod web;
 
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::Context;
-use esp_idf_hal::peripherals::Peripherals;
+use esp_idf_svc::hal::peripherals::Peripherals;
+use esp_idf_svc::nvs::EspDefaultNvsPartition;
 
 fn main() -> anyhow::Result<()> {
     // It is necessary to call this function once. Otherwise, some patches to the runtime
@@ -44,16 +48,38 @@ fn main() -> anyhow::Result<()> {
     let peripherals = Peripherals::take().context("периферия уже занята")?;
     let device_pins = pins::configure(&config.pins)?;
     let peripherals_i2c0 = peripherals.i2c0;
+    let peripherals_modem = peripherals.modem;
 
-    let (tx, rx) = mpsc::channel::<sensor::Reading>();
-    let calibration = Arc::new(Mutex::new(
-        calibration::Calibration::try_from(&config.calibration)
-            .context("секция [calibration] в config.toml")?,
-    ));
+    let nvs_partition = EspDefaultNvsPartition::take().context("NVS partition")?;
+
+    // Калибровка: NVS поверх config.toml (браузер имеет приоритет).
+    let store = Arc::new(storage::CalibrationStore::new(nvs_partition.clone())?);
+    let config_calibration = calibration::Calibration::try_from(&config.calibration)
+        .context("секция [calibration] в config.toml")?;
+    let calibration = Arc::new(Mutex::new(match store.load()? {
+        Some(saved) => {
+            log::info!("калибровка загружена из NVS");
+            saved
+        }
+        None => config_calibration,
+    }));
+
+    let net_status = Arc::new(Mutex::new(net::NetStatus::default()));
+    let _wifi_task = net::start(
+        peripherals_modem,
+        nvs_partition,
+        &secrets.wifi,
+        Arc::clone(&net_status),
+    )?;
+
+    // По каналу на подписчика: экран и веб.
+    let (tx_display, rx_display) = mpsc::channel::<sensor::Reading>();
+    let (tx_web, rx_web) = mpsc::channel::<sensor::Reading>();
+
     let _sensor_task = sensor::start(
         device_pins.dht11_data,
         Duration::from_secs(config.intervals.sensor_poll_secs),
-        tx,
+        vec![tx_display, tx_web],
         Arc::clone(&calibration),
     )?;
 
@@ -63,11 +89,23 @@ fn main() -> anyhow::Result<()> {
         device_pins.i2c_scl,
         &config.display,
         Duration::from_secs(config.intervals.display_refresh_secs),
-        rx,
+        rx_display,
+        Arc::clone(&net_status),
     )?;
 
-    // Потоки задач — не-демоны (как в std): ждем завершения сенсора, чтобы
-    // отловить падение задачи. Дисплей держит поток неявно через main.
+    let latest_reading = Arc::new(Mutex::new(None));
+    let _web_pump = web::start_pump(rx_web, Arc::clone(&latest_reading))?;
+    let _http_server = web::start_server(web::WebState {
+        latest: latest_reading,
+        calibration,
+        config_calibration,
+        store,
+        net: net_status,
+    })?;
+    log::info!("web: HTTP-сервер запущен на порту 80");
+
+    // Поток задач — не-демоны (как в std): ждём завершения сенсора, чтобы
+    // отловить падение задачи. Он умирает только при закрытии всех каналов.
     _sensor_task
         .join()
         .map_err(|_| anyhow::anyhow!("поток sensor_task завершился паникой"))?;
